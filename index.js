@@ -1,197 +1,96 @@
-
-const functions = require("firebase-functions");
+const express = require("express");
 const admin = require("firebase-admin");
 
+// Firebase Admin Initialize करें
 admin.initializeApp();
-
 const db = admin.firestore();
 
-exports.sendChatNotification = functions.firestore
-  .document("chats/{chatId}/messages/{messageId}")
-  .onCreate(async (snapshot, context) => {
-    const messageData = snapshot.data();
+const app = express();
+app.use(express.json());
 
-    if (!messageData) {
-      console.log("Chat message data missing.");
-      return null;
-    }
+// Render के लिए Health Check रूट (ताकि सर्वर एक्टिव रहे)
+app.get("/", (req, res) => {
+  status(200).send("Goojoy Backend Service is running successfully! 🚀");
+});
 
-    const receiverGtId = String(
-      messageData.receiverGtId || ""
-    ).trim();
+// =========================================================
+// 1. CHAT NOTIFICATION LISTENER (Background Listener)
+// =========================================================
+db.collectionGroup("messages").onSnapshot((snapshot) => {
+  snapshot.docChanges().forEach(async (change) => {
+    if (change.type === "added") {
+      const messageData = change.doc.data();
+      const messageId = change.doc.id;
 
-    const senderGtId = String(
-      messageData.senderGtId || ""
-    ).trim();
+      if (!messageData || messageData.fcmProcessed) return;
 
-    const messageText = String(
-      messageData.message || ""
-    );
+      const receiverGtId = String(messageData.receiverGtId || "").trim();
+      const senderGtId = String(messageData.senderGtId || "").trim();
+      const messageText = String(messageData.message || "");
 
-    if (!receiverGtId) {
-      console.log(
-        "Receiver GT-ID missing for chat notification."
-      );
-      return null;
-    }
+      if (!receiverGtId) return;
 
-    const userQuery = await db
-      .collection("users")
-      .where("gtId", "==", receiverGtId)
-      .limit(1)
-      .get();
-
-    if (userQuery.empty) {
-      console.log(
-        "Receiver not found for GT-ID:",
-        receiverGtId
-      );
-      return null;
-    }
-
-    const receiverData = userQuery.docs[0].data();
-
-    let tokens = [];
-
-    if (
-      typeof receiverData.fcmToken === "string" &&
-      receiverData.fcmToken.trim()
-    ) {
-      tokens.push(
-        receiverData.fcmToken.trim()
-      );
-    }
-
-    if (Array.isArray(receiverData.fcmTokens)) {
-      tokens.push(
-        ...receiverData.fcmTokens.filter(
-          (token) =>
-            typeof token === "string" &&
-            token.trim()
-        )
-      );
-    }
-
-    if (Array.isArray(receiverData.notificationTokens)) {
-      tokens.push(
-        ...receiverData.notificationTokens.filter(
-          (token) =>
-            typeof token === "string" &&
-            token.trim()
-        )
-      );
-    }
-
-    tokens = [...new Set(tokens)];
-
-    if (tokens.length === 0) {
-      console.log(
-        "No FCM Token registered for GT-ID:",
-        receiverGtId
-      );
-      return null;
-    }
-
-    const baseData = {
-      senderGtId: senderGtId,
-      receiverGtId: receiverGtId,
-      message: messageText,
-      messageId: String(
-        context.params.messageId || ""
-      ),
-      messageType: String(
-        messageData.messageType || "TEXT"
-      ),
-      timestamp: String(
-        messageData.timestamp || Date.now()
-      ),
-      isEdited: String(
-        messageData.isEdited || false
-      ),
-      status: String(
-        messageData.status || "delivered"
-      ),
-      mediaUrl: String(
-        messageData.mediaUrl || ""
-      ),
-      contactName: String(
-        messageData.contactName || ""
-      ),
-      contactPhone: String(
-        messageData.contactPhone || ""
-      ),
-      type: "CHAT",
-    };
-
-    let sentCount = 0;
-    let failedCount = 0;
-
-    for (const token of tokens) {
       try {
-        const response = await admin.messaging().send({
-          token: token,
-          data: baseData,
-          android: {
-            priority: "high",
-          },
-        });
+        // यूजर ढूंढें
+        const userQuery = await db
+          .collection("users")
+          .where("gtId", "==", receiverGtId)
+          .limit(1)
+          .get();
 
-        console.log(
-          "Private chat DATA-ONLY push sent:",
-          response,
-          "receiver:",
-          receiverGtId
-        );
+        if (userQuery.empty) return;
 
-        sentCount++;
+        const receiverData = userQuery.docs[0].data();
+        let tokens = [];
+
+        if (typeof receiverData.fcmToken === "string" && receiverData.fcmToken.trim()) {
+          tokens.push(receiverData.fcmToken.trim());
+        }
+        if (Array.isArray(receiverData.fcmTokens)) {
+          tokens.push(...receiverData.fcmTokens.filter(t => typeof t === "string" && t.trim()));
+        }
+
+        tokens = [...new Set(tokens)];
+        if (tokens.length === 0) return;
+
+        const baseData = {
+          senderGtId,
+          receiverGtId,
+          message: messageText,
+          messageId,
+          messageType: String(messageData.messageType || "TEXT"),
+          timestamp: String(messageData.timestamp || Date.now()),
+          type: "CHAT",
+        };
+
+        for (const token of tokens) {
+          await admin.messaging().send({
+            token,
+            data: baseData,
+            android: { priority: "high" },
+          });
+        }
+
+        // दोबारा प्रोसेस न हो इसके लिए मार्क करें
+        await change.doc.ref.set({ fcmProcessed: true }, { merge: true });
       } catch (error) {
-        console.error(
-          "Private chat push failed for token:",
-          token,
-          error
-        );
-
-        failedCount++;
+        console.error("Error sending chat notification:", error);
       }
     }
-
-    console.log(
-      "Private chat notification completed:",
-      {
-        senderGtId: senderGtId,
-        receiverGtId: receiverGtId,
-        sentCount: sentCount,
-        failedCount: failedCount,
-      }
-    );
-
-    return null;
   });
+});
 
-exports.sendOrganizationGateNotification =
-  functions.firestore
-    .document("user_mailboxes/{parentGtId}")
-    .onWrite(async (change, context) => {
-      if (!change.after.exists) {
-        return null;
-      }
+// =========================================================
+// 2. ORGANIZATION GATE NOTIFICATION LISTENER
+// =========================================================
+db.collection("user_mailboxes").onSnapshot((snapshot) => {
+  snapshot.docChanges().forEach(async (change) => {
+    if (change.type === "added" || change.type === "modified") {
+      const data = change.doc.data();
+      if (!data) return;
 
-      const data = change.after.data();
-
-      if (!data) {
-        return null;
-      }
-
-      const rawType =
-        data.notificationType ||
-        data.eventType ||
-        data.messageType ||
-        data.type ||
-        "";
-
-      const eventType = String(rawType)
-        .trim()
-        .toUpperCase();
+      const rawType = data.notificationType || data.eventType || data.type || "";
+      const eventType = String(rawType).trim().toUpperCase();
 
       const isGateEvent =
         eventType.includes("GATE") ||
@@ -200,214 +99,59 @@ exports.sendOrganizationGateNotification =
         eventType.includes("CHECK_IN") ||
         eventType.includes("CHECK_OUT");
 
-      if (!isGateEvent) {
-        return null;
-      }
+      if (!isGateEvent) return;
 
-      const parentGtId = String(
-        data.parentGtId ||
-        data.receiverGtId ||
-        data.targetGtId ||
-        context.params.parentGtId ||
-        ""
-      )
-        .trim()
-        .toUpperCase();
+      const parentGtId = String(data.parentGtId || data.receiverGtId || "").trim().toUpperCase();
+      if (!parentGtId) return;
 
-      if (!parentGtId) {
-        console.log(
-          "Organization gate notification: parent GT-ID missing."
-        );
-        return null;
-      }
+      const eventKey = `${parentGtId}_${eventType}_${data.timestamp || Date.now()}`;
+      if (data.lastFcmEventKey === eventKey) return;
 
-      const orgId = String(
-        data.orgId ||
-        data.senderGtId ||
-        data.instituteId ||
-        ""
-      )
-        .trim()
-        .toUpperCase();
+      try {
+        const userQuery = await db
+          .collection("users")
+          .where("gtId", "==", parentGtId)
+          .limit(1)
+          .get();
 
-      const orgName = String(
-        data.orgName ||
-        data.organizationName ||
-        data.senderName ||
-        "Organization"
-      );
+        if (userQuery.empty) return;
 
-      const studentName = String(
-        data.studentName ||
-        data.childName ||
-        ""
-      );
+        const receiverData = userQuery.docs[0].data();
+        let tokens = [];
 
-      const messageText = String(
-        data.message ||
-        data.body ||
-        (
-          eventType.includes("EXIT") ||
-          eventType.includes("CHECK_OUT")
-            ? `${studentName || "Your child"} has exited the campus.`
-            : `${studentName || "Your child"} has entered the campus.`
-        )
-      );
+        if (typeof receiverData.fcmToken === "string" && receiverData.fcmToken.trim()) {
+          tokens.push(receiverData.fcmToken.trim());
+        }
 
-      const timestamp = String(
-        data.timestamp ||
-        data.createdAt ||
-        Date.now()
-      );
+        tokens = [...new Set(tokens)];
+        if (tokens.length === 0) return;
 
-      const eventKey = [
-        parentGtId,
-        orgId,
-        eventType,
-        studentName,
-        messageText,
-        timestamp,
-      ].join("|");
+        const messageText = String(data.message || data.body || "Gate update received.");
 
-      if (data.lastFcmEventKey === eventKey) {
-        console.log(
-          "Duplicate organization gate event ignored:",
-          eventKey
-        );
-        return null;
-      }
+        const baseData = {
+          type: eventType,
+          message: messageText,
+          timestamp: String(data.timestamp || Date.now()),
+        };
 
-      const userQuery = await db
-        .collection("users")
-        .where("gtId", "==", parentGtId)
-        .limit(1)
-        .get();
-
-      if (userQuery.empty) {
-        console.log(
-          "Parent user not found for GT-ID:",
-          parentGtId
-        );
-        return null;
-      }
-
-      const receiverData = userQuery.docs[0].data();
-
-      let tokens = [];
-
-      if (
-        typeof receiverData.fcmToken === "string" &&
-        receiverData.fcmToken.trim()
-      ) {
-        tokens.push(
-          receiverData.fcmToken.trim()
-        );
-      }
-
-      if (Array.isArray(receiverData.fcmTokens)) {
-        tokens.push(
-          ...receiverData.fcmTokens.filter(
-            (token) =>
-              typeof token === "string" &&
-              token.trim()
-          )
-        );
-      }
-
-      if (Array.isArray(receiverData.notificationTokens)) {
-        tokens.push(
-          ...receiverData.notificationTokens.filter(
-            (token) =>
-              typeof token === "string" &&
-              token.trim()
-          )
-        );
-      }
-
-      tokens = [...new Set(tokens)];
-
-      if (tokens.length === 0) {
-        console.log(
-          "No FCM Token registered for parent GT-ID:",
-          parentGtId
-        );
-        return null;
-      }
-
-      const baseData = {
-        type: eventType,
-        notificationType: eventType,
-        eventType: eventType,
-        messageType: "GATE",
-        senderGtId: orgId,
-        receiverGtId: parentGtId,
-        parentGtId: parentGtId,
-        orgId: orgId,
-        orgName: orgName,
-        senderName: orgName,
-        studentName: studentName,
-        message: messageText,
-        body: messageText,
-        timestamp: timestamp,
-        eventKey: eventKey,
-      };
-
-      let sentCount = 0;
-      let failedCount = 0;
-
-      for (const token of tokens) {
-        try {
-          const response = await admin.messaging().send({
-            token: token,
-            data: baseData,
-            android: {
-              priority: "high",
-            },
-          });
-
-          console.log(
-            "Organization gate push sent:",
-            response,
-            "parent:",
-            parentGtId
-          );
-
-          sentCount++;
-        } catch (error) {
-          console.error(
-            "Organization gate push failed for token:",
+        for (const token of tokens) {
+          await admin.messaging().send({
             token,
-            error
-          );
-
-          failedCount++;
+            data: baseData,
+            android: { priority: "high" },
+          });
         }
+
+        await change.doc.ref.set({ lastFcmEventKey: eventKey }, { merge: true });
+      } catch (error) {
+        console.error("Error sending gate notification:", error);
       }
+    }
+  });
+});
 
-      await change.after.ref.set(
-        {
-          lastFcmEventKey: eventKey,
-          fcmSent: sentCount > 0,
-          fcmSentCount: sentCount,
-          fcmFailedCount: failedCount,
-          fcmProcessedAt:
-            admin.firestore.FieldValue.serverTimestamp(),
-        },
-        {
-          merge: true,
-        }
-      );
-
-      console.log(
-        "Organization gate notification completed:",
-        {
-          parentGtId: parentGtId,
-          orgId: orgId,
-          eventType: eventType,
-          sentCount: sentCount,
-          failedCount: failedCount,
-        }
-      );
-
-      return null;
-    });
+// Server Start (Render के लिए PORT ज़रूरी है)
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Goojoy backend server is running on port ${PORT}`);
+});
