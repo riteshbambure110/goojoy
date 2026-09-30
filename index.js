@@ -1,20 +1,18 @@
 const express = require("express");
 const admin = require("firebase-admin");
 
-// Firebase Admin Initialize करें
 admin.initializeApp();
 const db = admin.firestore();
 
 const app = express();
 app.use(express.json());
 
-// Render के लिए Health Check रूट (ताकि सर्वर एक्टिव रहे)
 app.get("/", (req, res) => {
-  status(200).send("Goojoy Backend Service is running successfully! 🚀");
+  res.status(200).send("Goojoy Backend Service is running successfully! 🚀");
 });
 
 // =========================================================
-// 1. CHAT NOTIFICATION LISTENER (Background Listener)
+// CHAT NOTIFICATION LISTENER
 // =========================================================
 db.collectionGroup("messages").onSnapshot((snapshot) => {
   snapshot.docChanges().forEach(async (change) => {
@@ -31,7 +29,6 @@ db.collectionGroup("messages").onSnapshot((snapshot) => {
       if (!receiverGtId) return;
 
       try {
-        // यूजर ढूंढें
         const userQuery = await db
           .collection("users")
           .where("gtId", "==", receiverGtId)
@@ -71,7 +68,6 @@ db.collectionGroup("messages").onSnapshot((snapshot) => {
           });
         }
 
-        // दोबारा प्रोसेस न हो इसके लिए मार्क करें
         await change.doc.ref.set({ fcmProcessed: true }, { merge: true });
       } catch (error) {
         console.error("Error sending chat notification:", error);
@@ -81,7 +77,7 @@ db.collectionGroup("messages").onSnapshot((snapshot) => {
 });
 
 // =========================================================
-// 2. ORGANIZATION GATE NOTIFICATION LISTENER
+// ORGANIZATION GATE NOTIFICATION LISTENER
 // =========================================================
 db.collection("user_mailboxes").onSnapshot((snapshot) => {
   snapshot.docChanges().forEach(async (change) => {
@@ -150,7 +146,6 @@ db.collection("user_mailboxes").onSnapshot((snapshot) => {
   });
 });
 
-// Server Start (Render के लिए PORT ज़रूरी है)
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Goojoy backend server is running on port ${PORT}`);
