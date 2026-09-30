@@ -1,13 +1,13 @@
 {
   "name": "goojoy",
   "version": "1.0.0",
-  "description": "FCM backend service",
+  "description": "Goojoy Backend Service",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "firebase-functions": "^4.0.0",
-    "firebase-admin": "^11.0.0"
+    "express": "^4.19.2",
+    "firebase-admin": "^11.11.0"
   }
 }
